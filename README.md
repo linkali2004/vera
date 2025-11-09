@@ -1,4 +1,4 @@
-# 🔐 VERA - Verify Everything Real Always
+# 🔐 VERA - Verify Every Real Asset
 
 <div align="center">
 
