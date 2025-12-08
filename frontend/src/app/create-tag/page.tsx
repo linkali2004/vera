@@ -18,6 +18,7 @@ import {
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import toast, { Toaster } from "react-hot-toast";
+import { initAuditTrail, logAuditEvent } from "@/utils/audit-utils";
 
 const ABI = [
   "function registerMedia(string memory mediaCid, string memory metadataCid, bytes32 contentHash) public",
@@ -35,17 +36,14 @@ function getEthersContract(signerOrProvider: ethers.Signer | ethers.Provider) {
 
 async function generateContentHash(file: File): Promise<string> {
   try {
-    // Read the file as ArrayBuffer
     const arrayBuffer = await file.arrayBuffer();
 
-    // Generate SHA-256 hash from the file content
     const hashBuffer = await crypto.subtle.digest("SHA-256", arrayBuffer);
     const hashArray = Array.from(new Uint8Array(hashBuffer));
     const hashHex = hashArray
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
 
-    // Convert to keccak256 hash for smart contract compatibility
     const keccakHash = ethers.keccak256("0x" + hashHex);
     return keccakHash;
   } catch (error) {
@@ -89,7 +87,6 @@ export default function CreateTagPage() {
   const [isDragOver, setIsDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Bulk upload states
   const [isBulkMode, setIsBulkMode] = useState(false);
   const [bulkFiles, setBulkFiles] = useState<File[]>([]);
   const [bulkResults, setBulkResults] = useState<PreparedData[]>([]);
@@ -133,7 +130,6 @@ export default function CreateTagPage() {
   };
 
   const processFile = (selectedFile: File) => {
-    // Validate file type
     const validTypes = ["image/", "video/", "audio/"];
     const isValidType = validTypes.some((type) =>
       selectedFile.type.startsWith(type)
@@ -151,10 +147,12 @@ export default function CreateTagPage() {
     setIsHighDeepfakeDetected(false);
     setIsVerified(false);
     setIsMediaAlreadyVerified(false);
+    
+    initAuditTrail(selectedFile.name);
+    logAuditEvent("FILE_UPLOAD", "File Selected for Single Upload", "SUCCESS", selectedFile.name);
   };
 
   const processBulkFiles = (selectedFiles: File[]) => {
-    // Validate file types
     const validTypes = ["image/", "video/", "audio/"];
     const validFiles = selectedFiles.filter((file) =>
       validTypes.some((type) => file.type.startsWith(type))
@@ -181,6 +179,9 @@ export default function CreateTagPage() {
     setDeepfakeWarning(null);
     setIsHighDeepfakeDetected(false);
     setIsVerified(false);
+    
+    initAuditTrail(`Bulk_Upload_${Date.now()}`);
+    logAuditEvent("FILE_UPLOAD", `Bulk Upload: ${validFiles.length} files selected`, "SUCCESS", `${validFiles.length} files`);
   };
 
   const handleDragOver = (event: React.DragEvent<HTMLDivElement>) => {
@@ -198,7 +199,6 @@ export default function CreateTagPage() {
   const handleDragLeave = (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     event.stopPropagation();
-    // Only set isDragOver to false if we're leaving the drop zone entirely
     if (!event.currentTarget.contains(event.relatedTarget as Node)) {
       setIsDragOver(false);
     }
@@ -228,7 +228,6 @@ export default function CreateTagPage() {
     setIsVerifying(true);
     setIsVerified(false);
 
-    // Initialize loading modal
     setLoadingModal({
       isVisible: true,
       title: "Verifying Uniqueness",
@@ -243,8 +242,9 @@ export default function CreateTagPage() {
       iconType: "verify",
     });
 
+    logAuditEvent("ON_CHAIN_CHECK", "Starting Uniqueness Verification", "PENDING", file.name);
+
     try {
-      // Step 1: Generate content hash from original file
       setLoadingModal((prev) => ({
         ...prev,
         progress: 25,
@@ -254,7 +254,8 @@ export default function CreateTagPage() {
       }));
 
       const contentHash = await generateContentHash(file);
-      // Step 2: Connect to blockchain
+      logAuditEvent("ON_CHAIN_CHECK", "Content Hash Generated (SHA256+Keccak)", "SUCCESS", contentHash);
+
       console.log("Content hash:", contentHash);
       setLoadingModal((prev) => ({
         ...prev,
@@ -267,7 +268,6 @@ export default function CreateTagPage() {
       const provider = new ethers.BrowserProvider(window.ethereum);
       const contract = getEthersContract(provider);
 
-      // Step 3: Check for duplicates
       setLoadingModal((prev) => ({
         ...prev,
         progress: 75,
@@ -278,29 +278,28 @@ export default function CreateTagPage() {
 
       try {
         const mediaData = await contract.getMedia(contentHash);
-        // If we get here, the media exists (not an error)
+        
         console.log("Duplicate found:", mediaData);
         setLoadingModal((prev) => ({ ...prev, isVisible: false }));
         setIsMediaAlreadyVerified(true);
         toast.error(
           "This media has already been registered on the blockchain."
         );
+        logAuditEvent("ON_CHAIN_CHECK", "Verification Failed (Duplicate)", "ERROR", `Registered by ${mediaData[2]}`);
         return;
       } catch (error: any) {
         console.log("Uniqueness check result:", error.message);
-        // Check if it's a "not found" error (which means unique)
         if (
           error.code === "CALL_EXCEPTION" ||
           error.code === "BAD_DATA" ||
           error.message?.includes("MediaNotFound") ||
           error.message?.includes("execution reverted")
         ) {
-          // File is unique, continue
+          
         } else {
           throw error;
         }
 
-        // Step 4: Verification complete
         setLoadingModal((prev) => ({
           ...prev,
           progress: 100,
@@ -311,8 +310,9 @@ export default function CreateTagPage() {
 
         toast.success("This media is unique. You can now detect deepfakes.");
         setIsVerified(true);
+        logAuditEvent("ON_CHAIN_CHECK", "Verification Success (Unique)", "SUCCESS", "Ready for AI Analysis");
 
-        // Close modal after brief delay
+
         setTimeout(() => {
           setLoadingModal((prev) => ({ ...prev, isVisible: false }));
         }, 1000);
@@ -322,6 +322,7 @@ export default function CreateTagPage() {
         err.message || "An unexpected error occurred during verification."
       );
       setLoadingModal((prev) => ({ ...prev, isVisible: false }));
+      logAuditEvent("ON_CHAIN_CHECK", "Verification Failed", "ERROR", String(err.message));
     } finally {
       setIsVerifying(false);
     }
@@ -336,10 +337,9 @@ export default function CreateTagPage() {
     setIsVerifying(true);
     setIsVerified(false);
 
-    // Initialize loading modal
     setLoadingModal({
       isVisible: true,
-      title: "Verifying Uniqueness",
+      title: "Verifying Uniqueness (Bulk)",
       subtitle: "Checking blockchain for duplicate media...",
       steps: [
         { text: "Generating file hashes", completed: false },
@@ -350,16 +350,18 @@ export default function CreateTagPage() {
       progress: 0,
       iconType: "verify",
     });
+    
+    logAuditEvent("ON_CHAIN_CHECK", "Starting Bulk Uniqueness Verification", "PENDING", `${bulkFiles.length} files`);
 
     try {
       const provider = new ethers.BrowserProvider(window.ethereum);
       const contract = getEthersContract(provider);
       const validFiles: File[] = [];
+      let duplicateCount = 0;
 
       for (let i = 0; i < bulkFiles.length; i++) {
         const currentFile = bulkFiles[i];
 
-        // Update progress
         const progress = ((i + 1) / bulkFiles.length) * 100;
         setLoadingModal((prev) => ({
           ...prev,
@@ -386,24 +388,23 @@ export default function CreateTagPage() {
 
           try {
             const mediaData = await contract.getMedia(contentHash);
-            // If we get here, the media exists (not an error)
+            
             console.log(`Duplicate found for ${currentFile.name}:`, mediaData);
             toast.error(
               `File "${currentFile.name}" has already been registered on the blockchain.`
             );
+            duplicateCount++;
           } catch (error: any) {
             console.log(
               `Uniqueness check for ${currentFile.name}:`,
               error.message
             );
-            // Check if it's a "not found" error (which means unique)
             if (
               error.code === "CALL_EXCEPTION" ||
               error.code === "BAD_DATA" ||
               error.message?.includes("MediaNotFound") ||
               error.message?.includes("execution reverted")
             ) {
-              // File is unique, add to valid files
               console.log(`File ${currentFile.name} is unique`);
               validFiles.push(currentFile);
             } else {
@@ -420,7 +421,6 @@ export default function CreateTagPage() {
         }
       }
 
-      // Update bulk files to only include valid ones
       setBulkFiles(validFiles);
 
       if (validFiles.length === 0) {
@@ -428,6 +428,7 @@ export default function CreateTagPage() {
           "All files have already been registered on the blockchain."
         );
         setLoadingModal((prev) => ({ ...prev, isVisible: false }));
+        logAuditEvent("ON_CHAIN_CHECK", "Bulk Verification Failed (All Duplicates)", "ERROR", `Duplicates: ${duplicateCount}`);
         return;
       }
 
@@ -440,8 +441,9 @@ export default function CreateTagPage() {
       }
 
       setIsVerified(true);
+      logAuditEvent("ON_CHAIN_CHECK", "Bulk Verification Success (Unique Files)", "SUCCESS", `${validFiles.length} files proceeded. Duplicates: ${duplicateCount}`);
 
-      // Close modal after brief delay
+
       setTimeout(() => {
         setLoadingModal((prev) => ({ ...prev, isVisible: false }));
       }, 1000);
@@ -450,6 +452,7 @@ export default function CreateTagPage() {
         err.message || "An unexpected error occurred during verification."
       );
       setLoadingModal((prev) => ({ ...prev, isVisible: false }));
+      logAuditEvent("ON_CHAIN_CHECK", "Bulk Verification Failed", "ERROR", String(err.message));
     } finally {
       setIsVerifying(false);
     }
@@ -467,7 +470,6 @@ export default function CreateTagPage() {
     setDeepfakeWarning(null);
     setIsHighDeepfakeDetected(false);
 
-    // Initialize loading modal
     setLoadingModal({
       isVisible: true,
       title: "Analyzing Multiple Files",
@@ -481,15 +483,18 @@ export default function CreateTagPage() {
       progress: 0,
       iconType: "ai",
     });
+    
+    logAuditEvent("AI_VERIFICATION", "Starting Bulk AI Analysis", "PENDING", `${bulkFiles.length} files`);
 
     try {
       const results: PreparedData[] = [];
+      let successCount = 0;
+      let rejectionCount = 0;
 
       for (let i = 0; i < bulkFiles.length; i++) {
         const currentFile = bulkFiles[i];
         setBulkProcessingIndex(i);
 
-        // Update progress
         const progress = ((i + 1) / bulkFiles.length) * 100;
         setLoadingModal((prev) => ({
           ...prev,
@@ -532,15 +537,12 @@ export default function CreateTagPage() {
               const reader = new FileReader();
               reader.onload = () => {
                 const result = reader.result as string;
-                // If the base64 is too large (>100KB), create a smaller thumbnail
                 if (result.length > 100000) {
-                  // For large files, create a smaller preview or use a placeholder
                   const canvas = document.createElement('canvas');
                   const ctx = canvas.getContext('2d');
                   const img = new Image();
                   
                   img.onload = () => {
-                    // Resize to max 200x200 to reduce size
                     const maxSize = 200;
                     let { width, height } = img;
                     
@@ -554,6 +556,7 @@ export default function CreateTagPage() {
                         width = (width * maxSize) / height;
                         height = maxSize;
                       }
+                      
                     }
                     
                     canvas.width = width;
@@ -565,8 +568,7 @@ export default function CreateTagPage() {
                   };
                   
                   img.onerror = () => {
-                    // Fallback to a simple placeholder
-                    resolve('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjY2NjIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGZvbnQtZmFtaWx5PSJBcmlhbCIgZm9udC1zaXplPSIxNCIgZmlsbD0iIzk5OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPk1lZGlhIFByZXZpZXc8L3RleHQ+PC9zdmc+');
+                    resolve('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjY2NjIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGZvbnQtZmFtaWx5PSJBcmlhbSIgZm9udC1zaXplPSIxNCIgZmlsbD0iIzk5OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPk1lZGlhIFByZXZpZXc8L3RleHQ+PC9zdmc+');
                   };
                   
                   img.src = result;
@@ -590,13 +592,15 @@ export default function CreateTagPage() {
 
           results.push(tagDataPayload);
 
-          // Check if file is fake using improved logic: deepfake_prob >= 50
           const isFake = detectionResult.deepfake_probability >= 50;
 
           if (isFake) {
             toast.error(
-              `Fake content detected in ${currentFile.name} (Deepfake: ${detectionResult.deepfake_probability}% vs Original: ${detectionResult.natural_probability}%) - will be excluded from registration`
+              `Fake content detected in ${currentFile.name} (Deepfake: ${detectionResult.deepfake_probability}%) - excluded`
             );
+            rejectionCount++;
+          } else {
+            successCount++;
           }
         } catch (error: any) {
           console.error(`Error processing ${currentFile.name}:`, error);
@@ -609,24 +613,25 @@ export default function CreateTagPage() {
       setBulkResults(results);
       setCurrentBulkIndex(0);
 
-      // Filter natural images using improved logic: deepfake_prob < 50
       const naturalImages = results.filter(
         (result) => result.detectionResult.deepfake_probability < 50
       );
 
       if (results.length === 0) {
         toast.error("Failed to analyze any files. Please try again.");
+        logAuditEvent("AI_VERIFICATION", "Bulk Analysis Failed (No results)", "ERROR", `Total files: ${bulkFiles.length}`);
       } else if (naturalImages.length === 0) {
         toast.error(
           "All files detected as potential deepfakes. Please try different files."
         );
+        logAuditEvent("AI_VERIFICATION", "Bulk Analysis Failed (All Rejected)", "ERROR", `Rejected: ${rejectionCount}`);
       } else {
         toast.success(
           `Analysis complete! ${naturalImages.length} out of ${results.length} files are original and will proceed to registration.`
         );
+        logAuditEvent("AI_VERIFICATION", "Bulk Analysis Complete", "SUCCESS", `Original: ${successCount}, Rejected: ${rejectionCount}`);
       }
 
-      // Close modal after brief delay
       setTimeout(() => {
         setLoadingModal((prev) => ({ ...prev, isVisible: false }));
       }, 1000);
@@ -634,6 +639,7 @@ export default function CreateTagPage() {
       console.error("Bulk analysis error:", err);
       toast.error(err.message || "Could not analyze the files.");
       setLoadingModal((prev) => ({ ...prev, isVisible: false }));
+      logAuditEvent("AI_VERIFICATION", "Bulk Analysis Unexpected Error", "ERROR", String(err.message));
     } finally {
       setIsDetecting(false);
       setBulkProcessingIndex(-1);
@@ -651,7 +657,6 @@ export default function CreateTagPage() {
     setPreparedData(null);
     setIsHighDeepfakeDetected(false);
 
-    // Initialize loading modal
     setLoadingModal({
       isVisible: true,
       title: "Analyzing Media",
@@ -665,9 +670,10 @@ export default function CreateTagPage() {
       progress: 0,
       iconType: "ai",
     });
+    
+    logAuditEvent("AI_VERIFICATION", "Starting Single AI Analysis", "PENDING", file.name);
 
     try {
-      // Step 1: Upload media
       setLoadingModal((prev) => ({
         ...prev,
         progress: 25,
@@ -679,7 +685,6 @@ export default function CreateTagPage() {
       const formData = new FormData();
       formData.append("file_data", file);
 
-      // Step 2: Run AI analysis
       setLoadingModal((prev) => ({
         ...prev,
         progress: 50,
@@ -697,8 +702,8 @@ export default function CreateTagPage() {
         throw new Error(`Detection service failed: ${errorText}`);
       }
       const detectionResult: DetectionResult = await response.json();
+      logAuditEvent("AI_VERIFICATION", "AI Detection Received", "SUCCESS", `Deepfake: ${detectionResult.deepfake_probability}%`);
 
-      // Step 3: Verify authenticity markers
       setLoadingModal((prev) => ({
         ...prev,
         progress: 75,
@@ -733,11 +738,9 @@ export default function CreateTagPage() {
         );
       }
 
-      // Use categorical system for rejection logic
       const naturalProbability = detectionResult.natural_probability;
       
       if (naturalProbability <= 50) {
-        // SYNTHETIC: Reject
         setIsHighDeepfakeDetected(true);
         setDeepfakeWarning(
           `SYNTHETIC content detected (${naturalProbability}% natural). Please try another media file.`
@@ -746,38 +749,25 @@ export default function CreateTagPage() {
           "SYNTHETIC content detected. Please try another media file."
         );
         setLoadingModal((prev) => ({ ...prev, isVisible: false }));
+        logAuditEvent("AI_VERIFICATION", "Analysis Failed (SYNTHETIC)", "ERROR", `Natural Prob: ${naturalProbability}%`);
         return;
       } else if (naturalProbability < 70) {
-        // INCONCLUSIVE: Show warning
         setDeepfakeWarning(
           `INCONCLUSIVE: AI analysis indicates moderate uncertainty (${naturalProbability}% natural).`
         );
       }
 
-      const fileToDataUrl = (file: File): Promise<string> => {
-        return new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result as string);
-          reader.onerror = (error) => reject(error);
-          reader.readAsDataURL(file);
-        });
-      };
-
-      // Create a smaller preview for storage (max 100KB)
       const createOptimizedPreview = async (file: File): Promise<string> => {
         return new Promise((resolve, reject) => {
           const reader = new FileReader();
           reader.onload = () => {
             const result = reader.result as string;
-            // If the base64 is too large (>100KB), create a smaller thumbnail
             if (result.length > 100000) {
-              // For large files, create a smaller preview or use a placeholder
               const canvas = document.createElement('canvas');
               const ctx = canvas.getContext('2d');
               const img = new Image();
               
               img.onload = () => {
-                // Resize to max 200x200 to reduce size
                 const maxSize = 200;
                 let { width, height } = img;
                 
@@ -802,8 +792,7 @@ export default function CreateTagPage() {
               };
               
               img.onerror = () => {
-                // Fallback to a simple placeholder
-                resolve('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjY2NjIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGZvbnQtZmFtaWx5PSJBcmlhbCIgZm9udC1zaXplPSIxNCIgZmlsbD0iIzk5OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPk1lZGlhIFByZXZpZXc8L3RleHQ+PC9zdmc+');
+                resolve('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjY2NjIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGZvbnQtZmFtaWx5PSJBcmlhbSIgZm9udC1zaXplPSIxNCIgZmlsbD0iIzk5OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPk1lZGlhIFByZXZpZXc8L2hlYWQ+PC9zdmc+');
               };
               
               img.src = result;
@@ -832,11 +821,11 @@ export default function CreateTagPage() {
       
       if (!storageSuccess) {
         toast.error("Unable to save data. Please try with a smaller file or clear your browser storage.");
+        logAuditEvent("DB_UPLOAD", "Local Storage Failed", "ERROR", "Storage quota exceeded or compression failed.");
         return;
       }
       setPreparedData(tagDataPayload);
 
-      // Step 4: Generate detailed report
       setLoadingModal((prev) => ({
         ...prev,
         progress: 100,
@@ -846,8 +835,9 @@ export default function CreateTagPage() {
       }));
 
       toast.success("Analysis complete. You can now proceed to register.");
+      logAuditEvent("AI_VERIFICATION", "Analysis Complete (Proceed to Review)", "SUCCESS", "Data prepared for review.");
 
-      // Close modal after brief delay
+
       setTimeout(() => {
         setLoadingModal((prev) => ({ ...prev, isVisible: false }));
       }, 1000);
@@ -855,6 +845,7 @@ export default function CreateTagPage() {
       console.error("Detection error:", err);
       toast.error(err.message || "Could not analyze the media.");
       setLoadingModal((prev) => ({ ...prev, isVisible: false }));
+      logAuditEvent("AI_VERIFICATION", "Analysis Failed", "ERROR", String(err.message));
     } finally {
       setIsDetecting(false);
     }
@@ -891,7 +882,6 @@ export default function CreateTagPage() {
         iconType={loadingModal.iconType}
       />
 
-      {/* Media Already Verified Overlay */}
       {isMediaAlreadyVerified && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 animate-in fade-in duration-300">
           <div className="bg-[#2A2D35] border border-[#3A3D45] rounded-2xl p-8 max-w-md mx-4 text-center shadow-2xl animate-in zoom-in-95 duration-300">
@@ -975,13 +965,11 @@ export default function CreateTagPage() {
                   <label className="text-sm font-medium text-gray-300">
                     Upload Media
                   </label>
-                  {/* Bulk Upload Toggle */}
                   <div className="flex items-center space-x-3">
                     <span className="text-xs text-gray-400">Single</span>
                     <button
                       onClick={() => {
                         setIsBulkMode(!isBulkMode);
-                        // Reset states when switching modes
                         if (!isBulkMode) {
                           setBulkFiles([]);
                           setBulkResults([]);
@@ -1153,7 +1141,7 @@ export default function CreateTagPage() {
                     onClick={handleVerifyOnChain}
                     disabled={!file || isProcessing || isVerified}
                     className="w-full font-semibold py-3 px-6 rounded-lg flex items-center justify-center transition-all duration-300 disabled:cursor-not-allowed bg-indigo-600 text-white hover:bg-indigo-700 disabled:bg-gray-600"
-                  >
+                    >
                     {isVerified ? (
                       <Check className="w-5 h-5 mr-2" />
                     ) : (
@@ -1254,9 +1242,7 @@ export default function CreateTagPage() {
               <button
                 onClick={async () => {
                   if (isBulkMode) {
-                    // Store ALL results (including deepfakes) for display on review page
                     if (bulkResults.length > 0) {
-                      // Compress data by removing base64 previews and storing only essential info
                       const compressedData = {
                         collectionName: fileName || "My Collection",
                         collectionDescription: description || "",
@@ -1276,7 +1262,6 @@ export default function CreateTagPage() {
                             cloudinary_public_id:
                               result.detectionResult.cloudinary_public_id,
                           },
-                          // Removed filePreview to reduce size
                         })),
                       };
 

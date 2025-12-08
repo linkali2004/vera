@@ -1,5 +1,6 @@
 "use client";
 
+import AuditTrailModal from "@/components/custom/audit-trail";
 import ConfirmationModal from "@/components/custom/confirmation-modal";
 import LoadingModal from "@/components/custom/loading-modal";
 import LoadingScreen from "@/components/custom/loading-screen";
@@ -23,11 +24,14 @@ import {
   Music,
   Share2,
   Trash2,
+  Info,
+  Clock,
 } from "lucide-react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import toast, { Toaster } from "react-hot-toast";
+
 
 const ABI = [
   "function registerMedia(string memory mediaCid, string memory metadataCid, bytes32 contentHash) public",
@@ -49,22 +53,18 @@ function getEthersContract(signerOrProvider: ethers.Signer | ethers.Provider) {
 }
 
 function formatHashForContract(hashAddress: string): string {
-  // Remove any whitespace
   let cleanHash = hashAddress.trim();
 
-  // Ensure it starts with 0x
   if (!cleanHash.startsWith("0x")) {
     cleanHash = "0x" + cleanHash;
   }
 
-  // Validate the hash format (should be 0x + 64 hex characters)
   if (cleanHash.length !== 66) {
     throw new Error(
       `Invalid hash format. Expected 66 characters (0x + 64 hex), got ${cleanHash.length}: ${cleanHash}`
     );
   }
 
-  // Validate it's a valid hex string
   if (!/^0x[0-9a-fA-F]{64}$/.test(cleanHash)) {
     throw new Error(`Invalid hex format: ${cleanHash}`);
   }
@@ -89,11 +89,9 @@ function decodeCustomError(errorData: string) {
 }
 
 function getCategoricalProbabilities(naturalProbability: number, detectionResult?: any) {
-  // Use the probabilities directly from the detection result (which now contain display values)
   const displayNatural = detectionResult?.natural_probability || naturalProbability;
   const displayDeepfake = detectionResult?.deepfake_probability || (100 - naturalProbability);
   
-  // Determine status based on the display values
   let status: string;
   if (displayNatural >= 90) {
     status = "AUTHENTIC";
@@ -114,16 +112,12 @@ function getCategoricalProbabilities(naturalProbability: number, detectionResult
 
 async function generateContentHash(file: File): Promise<string> {
   try {
-    // Read the file as ArrayBuffer
     const arrayBuffer = await file.arrayBuffer();
 
-    // Convert ArrayBuffer to WordArray for crypto-js
     const wordArray = CryptoJS.lib.WordArray.create(arrayBuffer);
 
-    // Generate SHA-256 hash using crypto-js
     const hashHex = CryptoJS.SHA256(wordArray).toString();
 
-    // Convert to keccak256 hash for smart contract compatibility
     const keccakHash = ethers.keccak256("0x" + hashHex);
     return keccakHash;
   } catch (error) {
@@ -150,6 +144,23 @@ async function unpinFromPinata(cid: string) {
   }
 }
 
+interface AuditTrailEvent {
+  id: string;
+  type: string;
+  label: string;
+  timestamp: number;
+  status: string;
+  details?: string;
+}
+
+interface AuditTrailData {
+  _id: string;
+  mediaId: string;
+  events: AuditTrailEvent[];
+  lastUpdated: number;
+  linkedHash: string;
+}
+
 interface Tag {
   _id: string;
   file_name: string;
@@ -166,6 +177,8 @@ interface Tag {
   audio_urls?: string[];
   file_count?: number;
   is_bulk_upload?: boolean;
+  audit_trail_id?: string;
+  audit_trail?: AuditTrailData;
 }
 
 interface Metadata {
@@ -206,6 +219,10 @@ export default function TagPageClient({ id }: TagPageClientProps) {
   );
   const [isDeregistering, setIsDeregistering] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
+  
+  const [isAuditTrailVisible, setIsAuditTrailVisible] = useState(false); 
+  const [isAuditTrailFetching, setIsAuditTrailFetching] = useState(false);
+
   const [loadingModal, setLoadingModal] = useState({
     isVisible: false,
     title: "",
@@ -215,7 +232,6 @@ export default function TagPageClient({ id }: TagPageClientProps) {
     iconType: "default" as "default" | "download" | "delete" | "verify" | "ai",
   });
 
-  // Carousel state for bulk uploads
   const [currentMediaIndex, setCurrentMediaIndex] = useState(0);
   const [isFilesDropdownOpen, setIsFilesDropdownOpen] = useState(false);
   const [confirmationModal, setConfirmationModal] = useState({
@@ -259,6 +275,7 @@ export default function TagPageClient({ id }: TagPageClientProps) {
         const result = await response.json();
         if (result.status !== "success" || !result.data.tag)
           throw new Error("The requested tag could not be found.");
+        
         setTag(result.data.tag);
       } catch (err: any) {
         setError(err.message);
@@ -269,6 +286,40 @@ export default function TagPageClient({ id }: TagPageClientProps) {
 
     fetchTagData();
   }, [id]);
+
+  useEffect(() => {
+    if (!tag?.audit_trail_id || tag.audit_trail) return;
+
+    const fetchAuditTrail = async () => {
+      setIsAuditTrailFetching(true);
+      try {
+        const response = await fetch(
+          `${process.env.NEXT_PUBLIC_API_BASE_URL}/api/audit-trail/${tag.audit_trail_id}`
+        );
+        if (!response.ok)
+          throw new Error("Failed to fetch audit trail data.");
+        const result = await response.json();
+        
+        if (result.status === "success" && result.data.auditTrail) {
+          setTag(prevTag => {
+            if (prevTag && prevTag._id === id) {
+              return {
+                ...prevTag,
+                audit_trail: result.data.auditTrail,
+              };
+            }
+            return prevTag;
+          });
+        }
+      } catch (err) {
+        console.error("Audit Trail fetch error:", err);
+      } finally {
+        setIsAuditTrailFetching(false);
+      }
+    };
+
+    fetchAuditTrail();
+  }, [tag, id]);
 
   useEffect(() => {
     if (!tag?.metadatacid) {
@@ -301,7 +352,6 @@ export default function TagPageClient({ id }: TagPageClientProps) {
     fetchMetadata();
   }, [tag]);
 
-  // Reset carousel index when tag changes
   useEffect(() => {
     setCurrentMediaIndex(0);
   }, [tag]);
@@ -338,9 +388,7 @@ export default function TagPageClient({ id }: TagPageClientProps) {
     }
 
     try {
-      // Check if media type should be watermarked (video or image)
       if (tag.type === "video" || tag.type === "img") {
-        // Step 1: Apply watermark first
         setLoadingModal((prev) => ({
           ...prev,
           progress: 20,
@@ -378,14 +426,10 @@ export default function TagPageClient({ id }: TagPageClientProps) {
           throw new Error("Backend did not return a watermarked URL.");
         }
 
-        // convert http to https by checking if the url starts with http:// and replacing it with https://
         if (watermarkedUrl.startsWith("http://")) {
           watermarkedUrl = watermarkedUrl.replace("http://", "https://");
         }
 
-        
-
-        // Step 2: Generate content hash from watermarked file
         setLoadingModal((prev) => ({
           ...prev,
           progress: 40,
@@ -394,7 +438,6 @@ export default function TagPageClient({ id }: TagPageClientProps) {
           ),
         }));
 
-        // Fetch the watermarked file and create File object
         const watermarkedResponse = await fetch(watermarkedUrl);
         if (!watermarkedResponse.ok) {
           throw new Error("Failed to fetch watermarked file");
@@ -413,7 +456,6 @@ export default function TagPageClient({ id }: TagPageClientProps) {
 
         console.log("Generated hash from watermarked file:", keccakHash);
 
-        // Step 3: Check smart contract for original media presence
         setLoadingModal((prev) => ({
           ...prev,
           progress: 60,
@@ -432,7 +474,6 @@ export default function TagPageClient({ id }: TagPageClientProps) {
         const signer = await provider.getSigner();
         const contract = getEthersContract(signer);
 
-        // Check if original media is already registered
         let isOriginalMediaRegistered = false;
         try {
           const existingMedia = await contract.getMedia(keccakHash);
@@ -442,12 +483,10 @@ export default function TagPageClient({ id }: TagPageClientProps) {
             isOriginalMediaRegistered
           );
         } catch (error) {
-          // Media not found, which means it's not registered
           isOriginalMediaRegistered = false;
           console.log("Original media not found in contract:", error);
         }
 
-        // Step 4: Register original media if not present
         if (!isOriginalMediaRegistered) {
           setLoadingModal((prev) => ({
             ...prev,
@@ -457,7 +496,6 @@ export default function TagPageClient({ id }: TagPageClientProps) {
             ),
           }));
 
-          // Generate dummy data for original media registration
           const originalMediaCid = "QmOriginalMediaCid" + Date.now();
           const originalMetadataCid = "QmOriginalMetadataCid" + Date.now();
 
@@ -481,7 +519,6 @@ export default function TagPageClient({ id }: TagPageClientProps) {
           } catch (registrationError: any) {
             console.error("Registration error:", registrationError);
 
-            // Check if it's a duplicate registration error
             if (
               registrationError.message?.includes("MediaAlreadyRegistered") ||
               registrationError.message?.includes("already registered") ||
@@ -518,7 +555,6 @@ export default function TagPageClient({ id }: TagPageClientProps) {
           );
         }
 
-        // Step 5: Download the watermarked media
         setLoadingModal((prev) => ({
           ...prev,
           progress: 100,
@@ -534,12 +570,10 @@ export default function TagPageClient({ id }: TagPageClientProps) {
         a.click();
         document.body.removeChild(a);
 
-        // Close loading modal after brief delay
         setTimeout(() => {
           setLoadingModal((prev) => ({ ...prev, isVisible: false }));
         }, 1000);
       } else {
-        // For audio files, download without watermarking
         setLoadingModal((prev) => ({
           ...prev,
           progress: 100,
@@ -559,7 +593,6 @@ export default function TagPageClient({ id }: TagPageClientProps) {
         document.body.removeChild(a);
         window.URL.revokeObjectURL(url);
 
-        // Close loading modal after brief delay
         setTimeout(() => {
           setLoadingModal((prev) => ({ ...prev, isVisible: false }));
         }, 1000);
@@ -655,7 +688,6 @@ export default function TagPageClient({ id }: TagPageClientProps) {
       const signer = await provider.getSigner();
       const contract = getEthersContract(signer);
 
-      // Format and validate hash
       let formattedHash: string;
       try {
         formattedHash = formatHashForContract(tag.hash_address);
@@ -767,7 +799,6 @@ export default function TagPageClient({ id }: TagPageClientProps) {
         ),
       }));
 
-      // Close loading modal after brief delay and redirect
       setTimeout(() => {
         setLoadingModal((prev) => ({ ...prev, isVisible: false }));
         router.push("/");
@@ -861,11 +892,18 @@ export default function TagPageClient({ id }: TagPageClientProps) {
         isLoading={isDeregistering}
         loadingText={isDeregistering ? "Deleting media..." : "Processing..."}
       />
+      
+      <AuditTrailModal 
+        isVisible={isAuditTrailVisible}
+        onClose={() => setIsAuditTrailVisible(false)}
+        trailData={tag.audit_trail}
+        linkedHash={tag.hash_address}
+      />
+
       <div className="max-w-7xl mx-auto p-4 sm:p-6 w-full">
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 xl:gap-8 items-start w-full">
           <div className="relative">
             {tag.is_bulk_upload ? (
-              // Bulk upload carousel
               <div className="space-y-4">
                 <div className="aspect-[1/1] w-full max-w-lg mx-auto xl:mx-0 overflow-hidden rounded-[20px] bg-black flex items-center justify-center relative">
                   {(() => {
@@ -916,7 +954,6 @@ export default function TagPageClient({ id }: TagPageClientProps) {
                     }
                   })()}
 
-                  {/* Navigation arrows */}
                   {(() => {
                     const allMediaUrls = [
                       ...(tag.img_urls || []),
@@ -960,7 +997,6 @@ export default function TagPageClient({ id }: TagPageClientProps) {
                   })()}
                 </div>
 
-                {/* File counter and dots */}
                 {(() => {
                   const allMediaUrls = [
                     ...(tag.img_urls || []),
@@ -993,7 +1029,6 @@ export default function TagPageClient({ id }: TagPageClientProps) {
                 })()}
               </div>
             ) : (
-              // Single media display
               <div className="aspect-[1/1] w-full max-w-lg mx-auto xl:mx-0 overflow-hidden rounded-[20px] bg-black flex items-center justify-center">
                 {tag.type === "video" ? (
                   <video
@@ -1069,7 +1104,6 @@ export default function TagPageClient({ id }: TagPageClientProps) {
                 ) : metadata ? (
                   <>
                     {metadata.isBulkUpload ? (
-                      // Bulk upload analysis - show current file analysis
                       <>
                         {(() => {
                           const currentFile = metadata.files?.[currentMediaIndex];
@@ -1111,26 +1145,16 @@ export default function TagPageClient({ id }: TagPageClientProps) {
                                   CATEGORICAL STATUS
                                 </p>
                                 <p className={`text-sm font-bold ${
-                                  status === "AUTHENTIC" ? "text-green-400" :
-                                  status === "INCONCLUSIVE" ? "text-yellow-400" :
+                                  categorical.status === "AUTHENTIC" ? "text-green-400" :
+                                  categorical.status === "INCONCLUSIVE" ? "text-yellow-400" :
                                   "text-red-400"
                                 }`}>
-                                  {status}
+                                  {categorical.status}
                                 </p>
                               </div>
                             </>
                           );
                         })()}
-                        {/* <div>
-                          <p className="text-xs font-semibold text-gray-400 mb-1">
-                            CONTENT ANALYSIS
-                          </p>
-                          <p className="text-sm text-gray-300 break-words">
-                            {metadata.files?.[currentMediaIndex]
-                              ?.detectionResult?.reasoning?.overall ||
-                              "No analysis available"}
-                          </p>
-                        </div> */}
                         {metadata.files?.[currentMediaIndex]?.detectionResult?.reasoning?.authentic_indicators && (
                           <div>
                             <p className="text-xs font-semibold text-gray-400 mb-1">
@@ -1166,7 +1190,6 @@ export default function TagPageClient({ id }: TagPageClientProps) {
                         </div>
                       </>
                     ) : (
-                      // Single upload analysis
                       <>
                         {(() => {
                           const naturalProb = metadata.probabilities?.natural || 0;
@@ -1206,11 +1229,11 @@ export default function TagPageClient({ id }: TagPageClientProps) {
                                   CATEGORICAL STATUS
                                 </p>
                                 <p className={`text-sm font-bold ${
-                                  status === "AUTHENTIC" ? "text-green-400" :
-                                  status === "INCONCLUSIVE" ? "text-yellow-400" :
+                                  categorical.status === "AUTHENTIC" ? "text-green-400" :
+                                  categorical.status === "INCONCLUSIVE" ? "text-yellow-400" :
                                   "text-red-400"
                                 }`}>
-                                  {status}
+                                  {categorical.status}
                                 </p>
                               </div>
                             </>
@@ -1263,7 +1286,6 @@ export default function TagPageClient({ id }: TagPageClientProps) {
               </div>
             </div>
 
-            {/* Files in Collection - Dropdown for bulk uploads */}
             {tag.is_bulk_upload &&
               (() => {
                 const allMediaUrls = [
@@ -1369,6 +1391,26 @@ export default function TagPageClient({ id }: TagPageClientProps) {
                 className="h-12 w-12 bg-[#2D2D30] border-gray-600 hover:bg-[#3D3D40] text-white rounded-lg"
               >
                 <Share2 className="h-5 w-5" />
+              </Button>
+              <Button
+                onClick={() => setIsAuditTrailVisible(true)}
+                variant="outline"
+                size="icon"
+                className={`h-12 w-12 border-gray-600 rounded-lg transition-colors ${
+                  isAuditTrailVisible
+                    ? "bg-blue-600 hover:bg-blue-700 text-white"
+                    : "bg-[#2D2D30] hover:bg-[#3D3D40] text-gray-400"
+                }`}
+                disabled={!tag.audit_trail_id || isAuditTrailFetching}
+                title={
+                  !tag.audit_trail_id
+                    ? "No Audit Trail Available"
+                    : isAuditTrailFetching
+                    ? "Loading Audit Trail..."
+                    : "View Audit Trail"
+                }
+              >
+                <Info className="h-5 w-5" />
               </Button>
               {isOwner && (
                 <Button

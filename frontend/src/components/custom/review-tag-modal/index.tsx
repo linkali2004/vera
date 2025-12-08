@@ -19,6 +19,7 @@ import {
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import toast from "react-hot-toast";
+import { logAuditEvent, getAuditTrail, clearAuditTrail } from "@/utils/audit-utils";
 
 declare global {
   var window: Window & {
@@ -76,17 +77,14 @@ async function uploadFileToPinata(file: File): Promise<string> {
 
 async function generateSha256Hash(file: File): Promise<string> {
   try {
-    // Read the file as ArrayBuffer
     const arrayBuffer = await file.arrayBuffer();
 
-    // Generate SHA-256 hash from the file content
     const hashBuffer = await crypto.subtle.digest("SHA-256", arrayBuffer);
     const hashArray = Array.from(new Uint8Array(hashBuffer));
     const hashHex = hashArray
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
 
-    // Convert to keccak256 hash for smart contract compatibility
     const keccakHash = ethers.keccak256("0x" + hashHex);
     return keccakHash;
   } catch (error) {
@@ -99,11 +97,9 @@ function getEthersContract(signerOrProvider: ethers.Signer | ethers.Provider) {
 }
 
 function getCategoricalProbabilities(authenticProbability: number, detectionResult?: any) {
-  // Use the probabilities directly from the detection result (which now contain display values)
   const displayAuthentic = detectionResult?.natural_probability || authenticProbability;
   const displayDeepfake = detectionResult?.deepfake_probability || (100 - authenticProbability);
   
-  // Determine status based on the display values
   let status: string;
   if (displayAuthentic >= 90) {
     status = "AUTHENTIC";
@@ -158,7 +154,6 @@ export default function ReviewTagModal({
     progress: 0,
   });
 
-  // Bulk upload states
   const [bulkData, setBulkData] = useState<any[]>([]);
   const [currentBulkIndex, setCurrentBulkIndex] = useState(0);
   const [isBulkMode, setIsBulkMode] = useState(false);
@@ -259,7 +254,6 @@ export default function ReviewTagModal({
 
   useEffect(() => {
     if (typeof window !== "undefined") {
-      // First check for bulk upload data
       const bulkDataRaw =
         localStorage.getItem("bulkUploadData") ||
         sessionStorage.getItem("bulkUploadData");
@@ -272,7 +266,6 @@ export default function ReviewTagModal({
           console.error("Error parsing bulk upload data:", error);
         }
       } else {
-        // Fall back to single upload data
         const storedData = localStorage.getItem("uploadedTagData");
         if (storedData) {
           try {
@@ -290,7 +283,6 @@ export default function ReviewTagModal({
       return toast.error("This function can only be called in the browser.");
     }
 
-    // Handle bulk upload mode
     if (isBulkMode) {
       const bulkDataRaw =
         localStorage.getItem("bulkUploadData") ||
@@ -312,7 +304,6 @@ export default function ReviewTagModal({
         );
       }
 
-      // Proceed with bulk registration
       setIsRegistering(true);
 
       setLoadingModal({
@@ -328,8 +319,9 @@ export default function ReviewTagModal({
         progress: 0,
       });
 
+      logAuditEvent("REGISTRATION_COMPLETE", "Starting Bulk Registration", "PENDING", `Processing ${naturalImages.length} authentic files`);
+
       try {
-        // Switch to Sepolia network
         setLoadingModal((prev) => ({
           ...prev,
           progress: 10,
@@ -342,6 +334,9 @@ export default function ReviewTagModal({
           method: "wallet_switchEthereumChain",
           params: [{ chainId: "0xaa36a7" }],
         });
+
+        logAuditEvent("METAMASK_SIGN", "Network Switch Requested", "SUCCESS", networkInfo.name);
+
       } catch (switchError) {
         if ((switchError as { code: number }).code === 4902) {
           try {
@@ -361,19 +356,24 @@ export default function ReviewTagModal({
                 },
               ],
             });
+            logAuditEvent("METAMASK_SIGN", "Network Added", "SUCCESS", "Sepolia added to MetaMask.");
           } catch (addError) {
             toast.error("Failed to add Sepolia network to MetaMask.");
             setIsRegistering(false);
             setLoadingModal((prev) => ({ ...prev, isVisible: false }));
+            logAuditEvent("METAMASK_SIGN", "Network Switch/Add Failed", "ERROR", "Failed to add Sepolia network.");
             return;
           }
         } else {
           toast.error("Failed to switch to Sepolia network.");
           setIsRegistering(false);
           setLoadingModal((prev) => ({ ...prev, isVisible: false }));
+          logAuditEvent("METAMASK_SIGN", "Network Switch Failed", "ERROR", "Failed to switch to Sepolia network.");
           return;
         }
       }
+
+      let contentHash = "";
 
       try {
         const provider = new ethers.BrowserProvider(window.ethereum);
@@ -388,16 +388,15 @@ export default function ReviewTagModal({
           ),
         }));
 
-        // Process all natural images as a single bulk upload
         const mediaFiles: File[] = [];
         const mediaUrls: string[] = [];
         const allMetadata: any[] = [];
 
-        // Download all files and prepare data
+        logAuditEvent("DB_UPLOAD", "Preparing files for IPFS upload", "PENDING", `Downloading ${naturalImages.length} files from Cloudinary`);
+
         for (let i = 0; i < naturalImages.length; i++) {
           const item = naturalImages[i];
 
-          // Update progress
           const progress = 30 + ((i + 1) / naturalImages.length) * 20;
           setLoadingModal((prev) => ({
             ...prev,
@@ -409,7 +408,6 @@ export default function ReviewTagModal({
             }`,
           }));
 
-          // Download the file from Cloudinary URL for IPFS upload
           let mediaFile: File;
           try {
             const response = await fetch(item.detectionResult.cloudinary_url);
@@ -422,7 +420,6 @@ export default function ReviewTagModal({
               `Failed to download ${item.name} from Cloudinary:`,
               error
             );
-            // Create a placeholder file if download fails
             mediaFile = new File([""], item.name, {
               type: `image/${item.mediaType}`,
             });
@@ -430,7 +427,6 @@ export default function ReviewTagModal({
             mediaUrls.push(item.detectionResult.cloudinary_url);
           }
 
-          // Prepare metadata for this item
           allMetadata.push({
             name: item.name,
             description: item.description,
@@ -439,6 +435,9 @@ export default function ReviewTagModal({
             cloudinaryUrl: item.detectionResult.cloudinary_url,
           });
         }
+        
+        logAuditEvent("DB_UPLOAD", "Files Downloaded from Cloudinary", "SUCCESS", `Ready to upload ${mediaFiles.length} files to IPFS`);
+
 
         setLoadingModal((prev) => ({
           ...prev,
@@ -446,14 +445,14 @@ export default function ReviewTagModal({
           subtitle: "Uploading files to IPFS...",
         }));
 
-        // Upload all files to IPFS
+        logAuditEvent("DB_UPLOAD", "Uploading files to IPFS", "PENDING");
+
         const mediaCids: string[] = [];
         for (let i = 0; i < mediaFiles.length; i++) {
           const mediaCid = await uploadFileToPinata(mediaFiles[i]);
           mediaCids.push(mediaCid);
         }
 
-        // Create combined metadata
         const combinedMetadata = {
           collectionName: bulkData.collectionName || "My Collection",
           collectionDescription: bulkData.collectionDescription || "",
@@ -473,16 +472,12 @@ export default function ReviewTagModal({
         );
         const metadataCid = await uploadFileToPinata(metadataFile);
 
-        // Generate content hash for the first file (representative hash)
-        const contentHash = await generateSha256Hash(mediaFiles[0]);
+        contentHash = await generateSha256Hash(mediaFiles[0]);
 
-        setLoadingModal((prev) => ({
-          ...prev,
-          progress: 70,
-          subtitle: "Saving to database...",
-        }));
+        logAuditEvent("DB_UPLOAD", "IPFS Upload Complete", "SUCCESS", `Media CIDs: ${mediaCids.length}, Metadata CID: ${metadataCid}`);
 
-        // Save to database as a single bulk record
+
+        
         const mediaType = naturalImages[0].mediaType || "image";
         const fileFieldName = `${mediaType}s`;
 
@@ -494,13 +489,22 @@ export default function ReviewTagModal({
         const route = routeMap[fileFieldName] || API_ENDPOINTS.TAGS;
 
         const backendFormData = new FormData();
+        
+        // --- ADD AUDIT TRAIL DATA TO FORMDATA ---
+        const auditTrail = getAuditTrail();
+        if (auditTrail) {
+            backendFormData.append("audit_trail", JSON.stringify({
+                ...auditTrail,
+                linkedHash: contentHash,
+            }));
+        }
+        // --- END ADD AUDIT TRAIL DATA ---
 
-        // Add all media files
+
         mediaFiles.forEach((file, index) => {
           backendFormData.append(fileFieldName, file);
         });
 
-        // Add all media URLs
         mediaUrls.forEach((url, index) => {
           backendFormData.append(`${fileFieldName}_urls`, url);
         });
@@ -511,7 +515,7 @@ export default function ReviewTagModal({
           combinedMetadata.collectionDescription
         );
         backendFormData.append("hash_address", contentHash);
-        backendFormData.append("mediacid", mediaCids.join(",")); // Comma-separated CIDs
+        backendFormData.append("mediacid", mediaCids.join(","));
         backendFormData.append("metadatacid", metadataCid);
         backendFormData.append("address", walletAddress);
         backendFormData.append(
@@ -520,6 +524,13 @@ export default function ReviewTagModal({
         );
         backendFormData.append("is_bulk_upload", "true");
         backendFormData.append("file_count", naturalImages.length.toString());
+
+        setLoadingModal((prev) => ({
+          ...prev,
+          progress: 60,
+          subtitle: "Saving to database...",
+        }));
+        logAuditEvent("DB_UPLOAD", "Saving Tag record to backend database", "PENDING");
 
         const backendRes = await fetch(route, {
           method: "POST",
@@ -530,7 +541,6 @@ export default function ReviewTagModal({
           const errorData = await backendRes.json();
           console.error("Backend error:", errorData);
 
-          // Handle specific error cases
           if (errorData.message?.includes("already exists")) {
             throw new Error(
               "One or more files have already been registered. Please check uniqueness again."
@@ -545,25 +555,32 @@ export default function ReviewTagModal({
             );
           }
         }
+        
+        logAuditEvent("DB_UPLOAD", "Backend Database Tag Save Complete", "SUCCESS", `Tag record saved for ${naturalImages.length} files.`);
+
 
         setLoadingModal((prev) => ({
           ...prev,
-          progress: 85,
+          progress: 75,
           subtitle: "Registering on blockchain...",
         }));
 
-        // Register on blockchain
         const contract = getEthersContract(signer);
         const formattedHash = contentHash.startsWith("0x")
           ? contentHash
           : "0x" + contentHash;
 
         const tx: TransactionResponse = await contract.registerMedia(
-          mediaCids.join(","), // Comma-separated CIDs
+          mediaCids.join(","),
           metadataCid,
           formattedHash
         );
+        
+        logAuditEvent("METAMASK_SIGN", "Transaction sent to blockchain", "PENDING", `Tx Hash: ${tx.hash}`);
+
         await tx.wait();
+
+        clearAuditTrail();
 
         setLoadingModal((prev) => ({
           ...prev,
@@ -576,6 +593,8 @@ export default function ReviewTagModal({
         toast.success(
           `Successfully registered ${naturalImages.length} authentic images on-chain!`
         );
+        logAuditEvent("REGISTRATION_COMPLETE", "Registration Confirmed on Chain", "SUCCESS", `Tx Confirmed: ${tx.hash}. Audit trail saved.`);
+
         localStorage.removeItem("bulkUploadData");
         sessionStorage.removeItem("bulkUploadData");
 
@@ -591,7 +610,6 @@ export default function ReviewTagModal({
           code?: string;
         };
 
-        // Handle specific error types
         let errorMessage =
           "An unexpected error occurred during bulk registration.";
 
@@ -614,6 +632,7 @@ export default function ReviewTagModal({
 
         toast.error(errorMessage);
         setLoadingModal((prev) => ({ ...prev, isVisible: false }));
+        logAuditEvent("REGISTRATION_COMPLETE", "Registration Failed", "ERROR", errorMessage);
       } finally {
         setIsRegistering(false);
       }
@@ -621,7 +640,6 @@ export default function ReviewTagModal({
       return;
     }
 
-    // Handle single upload mode
     const tagDataRaw = localStorage.getItem("uploadedTagData");
     const metadataRaw = localStorage.getItem("metadata");
     if (!tagDataRaw)
@@ -646,6 +664,8 @@ export default function ReviewTagModal({
       progress: 0,
     });
 
+    logAuditEvent("REGISTRATION_COMPLETE", "Starting Single Registration", "PENDING", tagData.name);
+
     try {
       setLoadingModal((prev) => ({
         ...prev,
@@ -659,6 +679,8 @@ export default function ReviewTagModal({
         method: "wallet_switchEthereumChain",
         params: [{ chainId: "0xaa36a7" }],
       });
+      logAuditEvent("METAMASK_SIGN", "Network Switch Requested", "SUCCESS", networkInfo.name);
+
     } catch (switchError) {
       if ((switchError as { code: number }).code === 4902) {
         try {
@@ -678,19 +700,24 @@ export default function ReviewTagModal({
               },
             ],
           });
+          logAuditEvent("METAMASK_SIGN", "Network Added", "SUCCESS", "Sepolia added to MetaMask.");
         } catch (addError) {
           toast.error("Failed to add Sepolia network to MetaMask.");
           setIsRegistering(false);
           setLoadingModal((prev) => ({ ...prev, isVisible: false }));
+          logAuditEvent("METAMASK_SIGN", "Network Switch/Add Failed", "ERROR", "Failed to add Sepolia network.");
           return;
         }
       } else {
         toast.error("Failed to switch to Sepolia network.");
         setIsRegistering(false);
         setLoadingModal((prev) => ({ ...prev, isVisible: false }));
+        logAuditEvent("METAMASK_SIGN", "Network Switch Failed", "ERROR", "Failed to switch to Sepolia network.");
         return;
       }
     }
+
+    let contentHash = "";
 
     try {
       const tagData = JSON.parse(tagDataRaw);
@@ -708,11 +735,18 @@ export default function ReviewTagModal({
         ),
       }));
 
-      const [mediaCid, metadataCid, contentHash] = await Promise.all([
+      logAuditEvent("DB_UPLOAD", "Uploading file and metadata to IPFS", "PENDING");
+
+
+      const [mediaCid, metadataCid, generatedHash] = await Promise.all([
         uploadFileToPinata(mediaFile),
         uploadFileToPinata(metadataFile),
         generateSha256Hash(mediaFile),
       ]);
+      contentHash = generatedHash;
+
+      logAuditEvent("DB_UPLOAD", "IPFS Upload Complete", "SUCCESS", `MediaCID: ${mediaCid}, MetaCID: ${metadataCid}`);
+
 
       setLoadingModal((prev) => ({
         ...prev,
@@ -721,6 +755,9 @@ export default function ReviewTagModal({
           index === 2 ? { ...step, completed: true } : step
         ),
       }));
+
+      logAuditEvent("DB_UPLOAD", "Saving record to backend database", "PENDING");
+
 
       const provider = new ethers.BrowserProvider(window.ethereum);
       const signer = await provider.getSigner();
@@ -737,6 +774,17 @@ export default function ReviewTagModal({
       const route = routeMap[fileFieldName] || API_ENDPOINTS.TAGS;
 
       const backendFormData = new FormData();
+      
+      // --- ADD AUDIT TRAIL DATA TO FORMDATA ---
+      const auditTrail = getAuditTrail();
+      if (auditTrail) {
+          backendFormData.append("audit_trail", JSON.stringify({
+              ...auditTrail,
+              linkedHash: contentHash,
+          }));
+      }
+      // --- END ADD AUDIT TRAIL DATA ---
+
       backendFormData.append(fileFieldName, mediaFile);
       backendFormData.append("file_name", tagData.name);
       backendFormData.append("hash_address", contentHash);
@@ -753,6 +801,9 @@ export default function ReviewTagModal({
         const errorData = await backendRes.json();
         throw new Error(errorData.message || "Failed to save to database.");
       }
+      
+      logAuditEvent("DB_UPLOAD", "Backend Database Tag Save Complete", "SUCCESS", `Record saved for ${tagData.name}.`);
+
 
       setLoadingModal((prev) => ({
         ...prev,
@@ -764,8 +815,6 @@ export default function ReviewTagModal({
 
       const contract = getEthersContract(signer);
 
-      // contentHash is already a keccak256 hash with 0x prefix from generateSha256Hash
-      // Validate the hash format before using it
       if (!contentHash.startsWith("0x") || contentHash.length !== 66) {
         throw new Error(`Invalid content hash format: ${contentHash}`);
       }
@@ -778,7 +827,12 @@ export default function ReviewTagModal({
         metadataCid,
         formattedHash
       );
+      
+      logAuditEvent("METAMASK_SIGN", "Transaction sent to blockchain", "PENDING", `Tx Hash: ${tx.hash}`);
+
       await tx.wait();
+      
+      clearAuditTrail();
 
       setLoadingModal((prev) => ({
         ...prev,
@@ -786,6 +840,8 @@ export default function ReviewTagModal({
       }));
 
       toast.success("Media successfully registered on-chain!");
+      logAuditEvent("REGISTRATION_COMPLETE", "Registration Confirmed on Chain", "SUCCESS", `Tx Confirmed: ${tx.hash}. Audit trail saved.`);
+
       localStorage.removeItem("uploadedTagData");
       localStorage.removeItem("metadata");
 
@@ -796,10 +852,10 @@ export default function ReviewTagModal({
     } catch (err) {
       console.error("Registration error:", err);
       const error = err as { reason?: string; message?: string };
-      toast.error(
-        error.reason || error.message || "An unexpected error occurred."
-      );
+      let errorMessage = error.reason || error.message || "An unexpected error occurred.";
+      toast.error(errorMessage);
       setLoadingModal((prev) => ({ ...prev, isVisible: false }));
+      logAuditEvent("REGISTRATION_COMPLETE", "Registration Failed", "ERROR", errorMessage);
     } finally {
       setIsRegistering(false);
     }
@@ -874,7 +930,6 @@ export default function ReviewTagModal({
                 <CardContent className="p-6">
                   <div className="space-y-4">
                     {isBulkMode ? (
-                      // Bulk upload carousel with analysis
                       <div className="space-y-4">
                         <div className="flex items-center justify-between">
                           <h3 className="text-white font-semibold">
@@ -971,10 +1026,7 @@ export default function ReviewTagModal({
                                 Preview unavailable
                               </p>
                             </div>
-                            {/* Status indicator overlay */}
-                            {bulkData.files &&
-                              bulkData.files[currentBulkIndex]
-                                ?.detectionResult && (() => {
+                            {(() => {
                                 const naturalProb = bulkData.files[currentBulkIndex].detectionResult.natural_probability;
                                 const detectionResult = bulkData.files[currentBulkIndex].detectionResult;
                                 const categorical = getCategoricalProbabilities(naturalProb, detectionResult);
@@ -994,7 +1046,6 @@ export default function ReviewTagModal({
                           </div>
                         </div>
 
-                        {/* Analysis details */}
                         {bulkData.files &&
                           bulkData.files[currentBulkIndex]?.detectionResult && (
                             <div className="space-y-3">
@@ -1080,7 +1131,6 @@ export default function ReviewTagModal({
                           )}
                       </div>
                     ) : (
-                      // Single upload preview with analysis
                       <div className="space-y-4">
                         <div className="flex items-center justify-between">
                           <h3 className="text-white font-semibold">
@@ -1105,7 +1155,6 @@ export default function ReviewTagModal({
                                 </p>
                               </div>
                             )}
-                            {/* Status indicator overlay */}
                             {tagData.detectionResult && (() => {
                               const naturalProb = tagData.detectionResult.natural_probability;
                               const detectionResult = tagData.detectionResult;
@@ -1126,7 +1175,6 @@ export default function ReviewTagModal({
                           </div>
                         </div>
 
-                        {/* Analysis details */}
                         {tagData.detectionResult && (
                           <div className="space-y-3">
                             <div className="flex items-center justify-between">
@@ -1315,7 +1363,6 @@ export default function ReviewTagModal({
               </Card>
             </div>
 
-            {/* Natural images note for bulk mode */}
             {isBulkMode && bulkData.files && bulkData.files.length > 0 && (
               <div className="mb-6 p-4 bg-blue-900/20 border border-blue-500/30 rounded-lg">
                 <div className="flex items-center space-x-3">

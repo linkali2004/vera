@@ -1,7 +1,11 @@
 import { deleteCloudinaryImage } from "../middleware/userUpload.js";
-import Tag from "./model.js";
+import Tag, { AuditTrail } from "./model.js";
+const saveAuditTrail = async (auditData) => {
+    const newAuditTrail = new AuditTrail(auditData);
+    const savedTrail = await newAuditTrail.save();
+    return savedTrail._id;
+};
 
-// Create a new tag
 export const createTag = async (req, res) => {
   try {
     const {
@@ -16,13 +20,30 @@ export const createTag = async (req, res) => {
       video_urls = [],
       audio_urls = [],
       file_size,
+      audit_trail, 
     } = req.body;
 
+    let audit_trail_id = null;
+    let final_hash_address = hash_address;
+
+    if (audit_trail) {
+        const auditData = JSON.parse(audit_trail);
+        if (auditData && auditData.linkedHash) {
+            final_hash_address = auditData.linkedHash;
+        }
+        
+        if (auditData && auditData.events && auditData.linkedHash) {
+            audit_trail_id = await saveAuditTrail({
+                ...auditData,
+                linkedHash: final_hash_address,
+            });
+        }
+    }
+
     console.log(video_urls);
-    // Validate required fields
     if (
       !file_name ||
-      !hash_address ||
+      !final_hash_address ||
       !address ||
       !type ||
       !mediacid ||
@@ -42,8 +63,7 @@ export const createTag = async (req, res) => {
       });
     }
 
-    // Check if tag with this hash_address already exists
-    const existingTag = await Tag.findOne({ hash_address });
+    const existingTag = await Tag.findOne({ hash_address: final_hash_address });
     if (existingTag) {
       return res.status(409).json({
         status: "error",
@@ -51,7 +71,6 @@ export const createTag = async (req, res) => {
       });
     }
 
-    // Validate that at least one media URL exists for the specified type
     let hasValidMedia = false;
     switch (type) {
       case "img":
@@ -72,11 +91,10 @@ export const createTag = async (req, res) => {
       });
     }
 
-    // Create new tag
     const tag = new Tag({
       file_name,
       description,
-      hash_address,
+      hash_address: final_hash_address,
       mediacid,
       metadatacid,
       address,
@@ -85,6 +103,7 @@ export const createTag = async (req, res) => {
       video_urls,
       audio_urls,
       file_size,
+      audit_trail_id,
     });
     await tag.save();
 
@@ -114,13 +133,13 @@ export const createTag = async (req, res) => {
           primary_media_url: tag.primary_media_url,
           createdAt: tag.createdAt,
           updatedAt: tag.updatedAt,
+          audit_trail_id: tag.audit_trail_id,
         },
       },
     });
   } catch (error) {
     console.error("Error creating tag:", error);
 
-    // Handle validation errors
     if (error.name === "ValidationError") {
       const errors = Object.values(error.errors).map((err) => err.message);
       return res.status(400).json({
@@ -130,7 +149,6 @@ export const createTag = async (req, res) => {
       });
     }
 
-    // Handle duplicate key errors
     if (error.code === 11000) {
       const field = Object.keys(error.keyPattern)[0];
       return res.status(409).json({
@@ -147,7 +165,6 @@ export const createTag = async (req, res) => {
   }
 };
 
-// Get all tags with pagination and filtering
 export const getAllTags = async (req, res) => {
   try {
     const {
@@ -160,26 +177,21 @@ export const getAllTags = async (req, res) => {
       sortOrder = "desc",
     } = req.query;
 
-    // Build filter object
     const filter = { status };
     if (type) filter.type = type;
     if (address) filter.address = address;
 
-    // Build sort object
     const sort = {};
     sort[sortBy] = sortOrder === "desc" ? -1 : 1;
 
-    // Calculate pagination
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
-    // Get tags with pagination
     const tags = await Tag.find(filter)
       .sort(sort)
       .skip(skip)
       .limit(parseInt(limit))
       .lean();
 
-    // Get total count for pagination
     const total = await Tag.countDocuments(filter);
 
     res.status(200).json({
@@ -204,12 +216,13 @@ export const getAllTags = async (req, res) => {
   }
 };
 
-// Get tag by ID
 export const getTagById = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const tag = await Tag.findById(id);
+    // Use populate to fetch the linked AuditTrail document
+    const tag = await Tag.findById(id).populate('audit_trail_id');
+    
     if (!tag) {
       return res.status(404).json({
         status: "error",
@@ -217,7 +230,6 @@ export const getTagById = async (req, res) => {
       });
     }
 
-    // Increment view count
     await tag.incrementViewCount();
 
     res.status(200).json({
@@ -245,6 +257,9 @@ export const getTagById = async (req, res) => {
           primary_media_url: tag.primary_media_url,
           createdAt: tag.createdAt,
           updatedAt: tag.updatedAt,
+          // Pass the populated object if it exists
+          audit_trail: tag.audit_trail_id || null, 
+          audit_trail_id: tag.audit_trail_id ? tag.audit_trail_id._id : null,
         },
       },
     });
@@ -258,7 +273,6 @@ export const getTagById = async (req, res) => {
   }
 };
 
-// Get tag by hash address
 export const getTagByHash = async (req, res) => {
   try {
     const { hash_address } = req.params;
@@ -271,7 +285,6 @@ export const getTagByHash = async (req, res) => {
       });
     }
 
-    // Increment view count
     await tag.incrementViewCount();
 
     res.status(200).json({
@@ -312,23 +325,18 @@ export const getTagByHash = async (req, res) => {
   }
 };
 
-// Get tags by user address
 export const getTagsByUser = async (req, res) => {
   try {
     const { address } = req.params;
     const { page = 1, limit = 10, type, status = "active" } = req.query;
 
-    // Build filter object
     const filter = { address };
     if (type) filter.type = type;
 
-    // Calculate pagination
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
-    // Get tags
     const tags = await Tag.find(filter);
 
-    // Get total count
     const total = await Tag.countDocuments(filter);
 
     res.status(200).json({
@@ -353,19 +361,16 @@ export const getTagsByUser = async (req, res) => {
   }
 };
 
-// Update tag by ID
 export const updateTag = async (req, res) => {
   try {
     const { id } = req.params;
     const updateData = req.body;
 
-    // Remove fields that shouldn't be updated directly
     delete updateData.hash_address;
     delete updateData.address;
     delete updateData.createdAt;
     delete updateData.updatedAt;
 
-    // Validate update data
     const allowedFields = [
       "file_name",
       "description",
@@ -391,7 +396,6 @@ export const updateTag = async (req, res) => {
       });
     }
 
-    // Check if tag exists
     const existingTag = await Tag.findById(id);
     if (!existingTag) {
       return res.status(404).json({
@@ -400,18 +404,15 @@ export const updateTag = async (req, res) => {
       });
     }
 
-    // Store old media URLs for cleanup
     const oldImgUrls = existingTag.img_urls || [];
     const oldVideoUrls = existingTag.video_urls || [];
     const oldAudioUrls = existingTag.audio_urls || [];
 
-    // Update tag
     const updatedTag = await Tag.findByIdAndUpdate(id, updateFields, {
       new: true,
       runValidators: true,
     });
 
-    // Clean up old media URLs from Cloudinary if they were replaced
     if (updateFields.img_urls) {
       const newImgUrls = updateFields.img_urls;
       const urlsToDelete = oldImgUrls.filter(
@@ -474,7 +475,6 @@ export const updateTag = async (req, res) => {
   } catch (error) {
     console.error("Error updating tag:", error);
 
-    // Handle validation errors
     if (error.name === "ValidationError") {
       const errors = Object.values(error.errors).map((err) => err.message);
       return res.status(400).json({
@@ -492,7 +492,6 @@ export const updateTag = async (req, res) => {
   }
 };
 
-// Delete tag by ID
 export const deleteTag = async (req, res) => {
   try {
     const { id } = req.params;
@@ -505,13 +504,11 @@ export const deleteTag = async (req, res) => {
       });
     }
 
-    // Clean up all media URLs from Cloudinary
     const allUrls = tag.getAllMediaUrls();
     for (const url of allUrls) {
       await deleteCloudinaryImage(url);
     }
 
-    // Delete tag
     await Tag.findByIdAndDelete(id);
 
     res.status(200).json({
@@ -528,7 +525,6 @@ export const deleteTag = async (req, res) => {
   }
 };
 
-// Like a tag
 export const likeTag = async (req, res) => {
   try {
     const { id } = req.params;
@@ -560,7 +556,6 @@ export const likeTag = async (req, res) => {
   }
 };
 
-// Get popular tags
 export const getPopularTags = async (req, res) => {
   try {
     const { limit = 10, type } = req.query;

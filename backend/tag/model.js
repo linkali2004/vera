@@ -79,7 +79,11 @@ const tagSchema = new mongoose.Schema(
         message: "Type must be either 'img', 'video', or 'audio'",
       },
     },
-    // Additional metadata
+    audit_trail_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      trim: true,
+      ref: 'AuditTrail',
+    },
     file_size: {
       type: Number,
       min: [0, "File size cannot be negative"],
@@ -93,13 +97,11 @@ const tagSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
-    // Status fields
     status: {
       type: String,
       enum: ["active", "inactive", "pending", "rejected"],
       default: "active",
     },
-    // View and interaction counts
     view_count: {
       type: Number,
       default: 0,
@@ -116,7 +118,6 @@ const tagSchema = new mongoose.Schema(
   }
 );
 
-// Indexes for better query performance
 tagSchema.index({ address: 1 });
 tagSchema.index({ hash_address: 1 });
 tagSchema.index({ type: 1 });
@@ -125,19 +126,16 @@ tagSchema.index({ createdAt: -1 });
 tagSchema.index({ view_count: -1 });
 tagSchema.index({ like_count: -1 });
 
-// Compound indexes for common queries
 tagSchema.index({ address: 1, type: 1 });
 tagSchema.index({ address: 1, status: 1 });
 tagSchema.index({ type: 1, status: 1 });
 
-// Virtual for total media count
 tagSchema.virtual("total_media_count").get(function () {
   return (this.img_urls?.length || 0) + 
          (this.video_urls?.length || 0) + 
          (this.audio_urls?.length || 0);
 });
 
-// Virtual for primary media URL (first media of the specified type)
 tagSchema.virtual("primary_media_url").get(function () {
   switch (this.type) {
     case "img":
@@ -151,13 +149,10 @@ tagSchema.virtual("primary_media_url").get(function () {
   }
 });
 
-// Ensure virtual fields are serialized
 tagSchema.set("toJSON", { virtuals: true });
 tagSchema.set("toObject", { virtuals: true });
 
-// Pre-save middleware to validate media URLs based on type
 tagSchema.pre("save", function (next) {
-  // Validate that at least one media URL exists for the specified type
   let hasValidMedia = false;
   
   switch (this.type) {
@@ -176,43 +171,36 @@ tagSchema.pre("save", function (next) {
     return next(new Error(`At least one ${this.type} URL is required`));
   }
   
-  // Set file_count based on actual media URLs
   this.file_count = this.total_media_count;
   this.is_bulk_upload = this.file_count > 1;
   
   next();
 });
 
-// Static method to find tags by user address
 tagSchema.statics.findByUserAddress = function (address) {
   return this.find({ address, status: "active" }).sort({ createdAt: -1 });
 };
 
-// Static method to find tags by type
 tagSchema.statics.findByType = function (type) {
   return this.find({ type, status: "active" }).sort({ createdAt: -1 });
 };
 
-// Static method to find popular tags
 tagSchema.statics.findPopular = function (limit = 10) {
   return this.find({ status: "active" })
     .sort({ view_count: -1, like_count: -1 })
     .limit(limit);
 };
 
-// Instance method to increment view count
 tagSchema.methods.incrementViewCount = function () {
   this.view_count += 1;
   return this.save();
 };
 
-// Instance method to increment like count
 tagSchema.methods.incrementLikeCount = function () {
   this.like_count += 1;
   return this.save();
 };
 
-// Instance method to get all media URLs
 tagSchema.methods.getAllMediaUrls = function () {
   const allUrls = [];
   if (this.img_urls) allUrls.push(...this.img_urls);
@@ -220,5 +208,25 @@ tagSchema.methods.getAllMediaUrls = function () {
   if (this.audio_urls) allUrls.push(...this.audio_urls);
   return allUrls;
 };
+
+
+const auditEventSchema = new mongoose.Schema({
+    id: String,
+    type: String,
+    label: String,
+    timestamp: Number,
+    status: String,
+    details: String,
+}, { _id: false });
+
+const AuditTrailSchema = new mongoose.Schema({
+    mediaId: { type: String, required: true, index: true },
+    events: [auditEventSchema],
+    lastUpdated: { type: Number, required: true },
+    linkedHash: { type: String, required: true, index: true },
+}, { timestamps: true });
+
+export const AuditTrail = mongoose.models.AuditTrail || mongoose.model("AuditTrail", AuditTrailSchema);
+
 
 export default mongoose.model("Tag", tagSchema);
