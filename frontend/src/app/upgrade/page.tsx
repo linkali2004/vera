@@ -29,7 +29,7 @@ export default function UpgradePage() {
       icon: <Crown className="w-6 h-6" />,
       title: "Premium Content Creation",
       description:
-        "Unlimited media uploads with advanced AI-powered verification tools",
+        "Unlimited media uploads with advanced AI-powered verification tools just",
     },
     {
       icon: <Zap className="w-6 h-6" />,
