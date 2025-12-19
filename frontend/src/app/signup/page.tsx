@@ -25,7 +25,7 @@ export default function SignUpPage() {
 
   const handleConnectWallet = async () => {
     if (typeof window.ethereum === "undefined") {
-      toast.error("MetaMask is not installed. Please install it to continue.");
+      toast.error("");
       return;
     }
     try {
